@@ -1,0 +1,136 @@
+name: Build vcpkg packages
+
+# Rebuild whenever vcpkg.json changes (baseline or deps), or on demand.
+on:
+  push:
+    branches: [main]
+    paths: ['vcpkg.json']
+  workflow_dispatch:
+
+# Each job builds the binary cache for one platform and publishes it as a
+# GitHub Release asset so QuantClaw CI can download it without recompiling.
+jobs:
+  # ── Windows x64 ────────────────────────────────────────────────────────────
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+      # Write compiled packages into a local directory that we'll tarball up.
+      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg-bincache,readwrite"
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Update and bootstrap vcpkg
+      run: |
+        git -C "$env:VCPKG_INSTALLATION_ROOT" fetch --depth=1
+        git -C "$env:VCPKG_INSTALLATION_ROOT" checkout FETCH_HEAD
+        & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+
+    - name: Install vcpkg packages
+      run: |
+        & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
+          --triplet x64-windows `
+          --x-manifest-root "$env:GITHUB_WORKSPACE" `
+          --x-install-root "$env:GITHUB_WORKSPACE\vcpkg_installed"
+
+    - name: Get baseline short hash
+      id: meta
+      run: |
+        $baseline = (Get-Content vcpkg.json | ConvertFrom-Json).'builtin-baseline'
+        $short = $baseline.Substring(0, 8)
+        echo "baseline_short=$short" >> $env:GITHUB_OUTPUT
+        echo "tag=vcpkg-windows-x64-$short" >> $env:GITHUB_OUTPUT
+
+    - name: Package binary cache
+      run: |
+        tar -czf vcpkg-bincache-windows-x64.tar.gz vcpkg-bincache/
+
+    - name: Package installed tree
+      run: |
+        tar -czf vcpkg-installed-windows-x64.tar.gz vcpkg_installed/
+
+    - name: Publish Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.meta.outputs.tag }}
+        name: "vcpkg Windows x64 (baseline ${{ steps.meta.outputs.baseline_short }})"
+        body: |
+          Pre-built vcpkg packages for QuantClaw CI (Windows x64).
+
+          **vcpkg baseline**: `${{ steps.meta.outputs.baseline_short }}`
+          **Triplet**: `x64-windows`
+          **Packages**: spdlog, nlohmann-json, curl, openssl, ixwebsocket, gtest, cpp-httplib
+
+          | Asset | Contents |
+          |-------|----------|
+          | `vcpkg-bincache-windows-x64.tar.gz` | Binary cache (for `VCPKG_BINARY_SOURCES`) |
+          | `vcpkg-installed-windows-x64.tar.gz` | Full installed tree (direct use) |
+        files: |
+          vcpkg-bincache-windows-x64.tar.gz
+          vcpkg-installed-windows-x64.tar.gz
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Linux x64 ──────────────────────────────────────────────────────────────
+  build-linux:
+    name: Build Linux x64
+    runs-on: ubuntu-latest
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-linux
+      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg-bincache,readwrite"
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install build tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          cmake ninja-build curl zip unzip tar \
+          pkg-config nasm autoconf libtool
+
+    - name: Bootstrap vcpkg
+      run: |
+        git clone https://github.com/microsoft/vcpkg.git /opt/vcpkg --depth=1
+        /opt/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+        echo "VCPKG_ROOT=/opt/vcpkg" >> $GITHUB_ENV
+
+    - name: Install vcpkg packages
+      run: |
+        /opt/vcpkg/vcpkg install \
+          --triplet x64-linux \
+          --x-manifest-root "$GITHUB_WORKSPACE" \
+          --x-install-root "$GITHUB_WORKSPACE/vcpkg_installed"
+
+    - name: Get baseline short hash
+      id: meta
+      run: |
+        baseline=$(python3 -c "import json,sys; print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+        short="${baseline:0:8}"
+        echo "baseline_short=$short" >> $GITHUB_OUTPUT
+        echo "tag=vcpkg-linux-x64-$short" >> $GITHUB_OUTPUT
+
+    - name: Package binary cache
+      run: tar -czf vcpkg-bincache-linux-x64.tar.gz vcpkg-bincache/
+
+    - name: Package installed tree
+      run: tar -czf vcpkg-installed-linux-x64.tar.gz vcpkg_installed/
+
+    - name: Publish Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.meta.outputs.tag }}
+        name: "vcpkg Linux x64 (baseline ${{ steps.meta.outputs.baseline_short }})"
+        body: |
+          Pre-built vcpkg packages for QuantClaw CI (Linux x64).
+
+          **vcpkg baseline**: `${{ steps.meta.outputs.baseline_short }}`
+          **Triplet**: `x64-linux`
+          **Packages**: spdlog, nlohmann-json, curl, openssl, ixwebsocket, gtest, cpp-httplib
+        files: |
+          vcpkg-bincache-linux-x64.tar.gz
+          vcpkg-installed-linux-x64.tar.gz
+        token: ${{ secrets.GITHUB_TOKEN }}
